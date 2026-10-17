@@ -58,8 +58,45 @@ func resourceTableReplica() *schema.Resource {
 			Update: schema.DefaultTimeout(20 * time.Minute),
 		},
 
+		CustomizeDiff: func(_ context.Context, d *schema.ResourceDiff, _ any) error {
+			if !d.NewValueKnown("consistency_mode") || !d.NewValueKnown("global_table_witness.0.region_name") {
+				return nil
+			}
+			strong := awstypes.MultiRegionConsistency(d.Get("consistency_mode").(string)) == awstypes.MultiRegionConsistencyStrong
+			witness := expandGlobalTableWitness(d.Get("global_table_witness")) != ""
+			switch {
+			case strong && !witness:
+				return errors.New(`consistency_mode "STRONG" requires global_table_witness; for a three-replica MRSC table use the replica block of aws_dynamodb_table`)
+			case witness && !strong:
+				return errors.New(`global_table_witness requires consistency_mode "STRONG"`)
+			}
+			return nil
+		},
 		SchemaFunc: func() map[string]*schema.Schema {
 			return map[string]*schema.Schema{
+				"consistency_mode": {
+					Type:             schema.TypeString,
+					Optional:         true,
+					ForceNew:         true,
+					Default:          awstypes.MultiRegionConsistencyEventual,
+					ValidateDiagFunc: enum.Validate[awstypes.MultiRegionConsistency](),
+				},
+				"global_table_witness": {
+					Type:     schema.TypeList,
+					Optional: true,
+					ForceNew: true,
+					MaxItems: 1,
+					Elem: &schema.Resource{
+						Schema: map[string]*schema.Schema{
+							"region_name": {
+								Type:         schema.TypeString,
+								Required:     true,
+								ForceNew:     true,
+								ValidateFunc: verify.ValidRegionName,
+							},
+						},
+					},
+				},
 				names.AttrARN: { // direct to replica
 					Type:     schema.TypeString,
 					Computed: true,
@@ -144,6 +181,15 @@ func resourceTableReplicaCreate(ctx context.Context, d *schema.ResourceData, met
 		ReplicaUpdates: []awstypes.ReplicationGroupUpdate{{
 			Create: replicaInput,
 		}},
+	}
+
+	if v := awstypes.MultiRegionConsistency(d.Get("consistency_mode").(string)); v == awstypes.MultiRegionConsistencyStrong {
+		input.MultiRegionConsistency = v
+		input.GlobalTableWitnessUpdates = []awstypes.GlobalTableWitnessGroupUpdate{{
+			Create: &awstypes.CreateGlobalTableWitnessGroupMemberAction{
+				RegionName: aws.String(expandGlobalTableWitness(d.Get("global_table_witness"))),
+			},
+		}}
 	}
 
 	err = tfresource.Retry(ctx, max(replicaUpdateTimeout, d.Timeout(schema.TimeoutCreate)), func(ctx context.Context) *tfresource.RetryError {
@@ -268,6 +314,14 @@ func resourceTableReplicaRead(ctx context.Context, d *schema.ResourceData, meta 
 		d.Set("table_class_override", nil)
 	}
 
+	mrc := awstypes.MultiRegionConsistencyEventual
+	if table.MultiRegionConsistency != "" {
+		mrc = table.MultiRegionConsistency
+	}
+	d.Set("consistency_mode", string(mrc))
+	if err := d.Set("global_table_witness", flattenGlobalTableWitnesses(table.GlobalTableWitnesses)); err != nil {
+		return create.AppendDiagSettingError(diags, names.DynamoDB, resNameTableReplica, d.Id(), "global_table_witness", err)
+	}
 	return append(diags, resourceTableReplicaReadReplica(ctx, d, meta)...)
 }
 
@@ -448,6 +502,15 @@ func resourceTableReplicaDelete(ctx context.Context, d *schema.ResourceData, met
 				},
 			},
 		},
+	}
+
+	if awstypes.MultiRegionConsistency(d.Get("consistency_mode").(string)) == awstypes.MultiRegionConsistencyStrong {
+		input.MultiRegionConsistency = awstypes.MultiRegionConsistencyStrong
+		input.GlobalTableWitnessUpdates = []awstypes.GlobalTableWitnessGroupUpdate{{
+			Delete: &awstypes.DeleteGlobalTableWitnessGroupMemberAction{
+				RegionName: aws.String(expandGlobalTableWitness(d.Get("global_table_witness"))),
+			},
+		}}
 	}
 
 	err = tfresource.Retry(ctx, updateTableTimeout, func(ctx context.Context) *tfresource.RetryError {

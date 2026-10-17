@@ -58,11 +58,29 @@ resource "aws_dynamodb_table_replica" "example" {
 }
 ```
 
+### Multi-Region Strong Consistency
+
+Multi-Region Strong Consistency (MRSC) requires the whole topology to be created in a single API call. Because this resource creates one replica, `STRONG` consistency is only supported together with a `global_table_witness`. To create an MRSC global table with two replicas, use the `replica` block of the `aws_dynamodb_table` resource instead.
+
+```terraform
+resource "aws_dynamodb_table_replica" "example" {
+  provider         = aws.alt
+  global_table_arn = aws_dynamodb_table.example.arn
+  consistency_mode = "STRONG"
+
+  global_table_witness {
+    region_name = "us-west-2"
+  }
+}
+```
+
 ## Argument Reference
 
 The following arguments are required:
 
 * `global_table_arn` - (Required) ARN of the _main_ or global table which this resource will replicate.
+* `consistency_mode` - (Optional) Consistency mode of the global table. Valid values are `EVENTUAL` (default) and `STRONG`. `STRONG` requires `global_table_witness`. Changing this value forces a new resource.
+* `global_table_witness` - (Optional) Witness Region for a Multi-Region Strong Consistency global table. Requires `consistency_mode = "STRONG"`. Changing this value forces a new resource. See [`global_table_witness`](#global_table_witness) below.
 
 The following arguments are optional:
 
@@ -72,6 +90,10 @@ The following arguments are optional:
 * `point_in_time_recovery` - (Optional) Whether to enable Point In Time Recovery for the table replica. Default is `false`.
 * `table_class_override` - (Optional, Forces new resource) Storage class of the table replica. Valid values are `STANDARD` and `STANDARD_INFREQUENT_ACCESS`. If not used, the table replica will use the same class as the global table.
 * `tags` - (Optional) Map of tags to populate on the created table. If configured with a provider [`default_tags` configuration block](https://registry.terraform.io/providers/hashicorp/aws/latest/docs#default_tags-configuration-block) present, tags with matching keys will overwrite those defined at the provider-level.
+
+### global_table_witness
+
+* `region_name` - (Required) Region in which the witness is created.
 
 ## Attribute Reference
 

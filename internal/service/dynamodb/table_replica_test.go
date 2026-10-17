@@ -8,10 +8,15 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/YakDriver/regexache"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	awstypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
 	"github.com/hashicorp/terraform-provider-aws/internal/retry"
 	tfdynamodb "github.com/hashicorp/terraform-provider-aws/internal/service/dynamodb"
@@ -733,4 +738,116 @@ resource "aws_dynamodb_table_replica" "test" {
   }
 }
 `, rName, deletionProtection))
+}
+
+func TestAccDynamoDBTableReplica_MRSC_witness(t *testing.T) {
+	ctx := acctest.Context(t)
+	if testing.Short() {
+		t.Skip("skipping long-running test in short mode")
+	}
+
+	resourceName := "aws_dynamodb_table_replica.test"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			acctest.PreCheckMultipleRegion(t, 3)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.DynamoDBServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5FactoriesMultipleRegions(ctx, t, 3),
+		CheckDestroy:             testAccCheckTableReplicaDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTableReplicaConfig_MRSC_witness(rName),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("consistency_mode"), knownvalue.StringExact(string(awstypes.MultiRegionConsistencyStrong))),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("global_table_witness"), knownvalue.ListExact([]knownvalue.Check{
+						knownvalue.ObjectExact(map[string]knownvalue.Check{
+							"region_name": knownvalue.StringExact(acctest.ThirdRegion()),
+						}),
+					})),
+				},
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccDynamoDBTableReplica_MRSC_strongWithoutWitness(t *testing.T) {
+	ctx := acctest.Context(t)
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			acctest.PreCheckMultipleRegion(t, 3)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.DynamoDBServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5FactoriesMultipleRegions(ctx, t, 3),
+		CheckDestroy:             testAccCheckTableReplicaDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config:      testAccTableReplicaConfig_MRSC_strongWithoutWitness(rName),
+				ExpectError: regexache.MustCompile(`requires global_table_witness`),
+			},
+		},
+	})
+}
+
+func testAccTableReplicaConfig_MRSC_base(rName string) string {
+	return fmt.Sprintf(`
+data "aws_region" "third" {
+  provider = "awsthird"
+}
+
+resource "aws_dynamodb_table" "test" {
+  name             = %[1]q
+  hash_key         = "TestTableHashKey"
+  billing_mode     = "PAY_PER_REQUEST"
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+
+  attribute {
+    name = "TestTableHashKey"
+    type = "S"
+  }
+
+  lifecycle {
+    ignore_changes = [replica, global_table_witness]
+  }
+}
+`, rName)
+}
+
+func testAccTableReplicaConfig_MRSC_witness(rName string) string {
+	return acctest.ConfigCompose(
+		acctest.ConfigMultipleRegionProvider(3),
+		testAccTableReplicaConfig_MRSC_base(rName), `
+resource "aws_dynamodb_table_replica" "test" {
+  provider         = "awsalternate"
+  global_table_arn = aws_dynamodb_table.test.arn
+  consistency_mode = "STRONG"
+
+  global_table_witness {
+    region_name = data.aws_region.third.name
+  }
+}
+`)
+}
+
+func testAccTableReplicaConfig_MRSC_strongWithoutWitness(rName string) string {
+	return acctest.ConfigCompose(
+		acctest.ConfigMultipleRegionProvider(3),
+		testAccTableReplicaConfig_MRSC_base(rName), `
+resource "aws_dynamodb_table_replica" "test" {
+  provider         = "awsalternate"
+  global_table_arn = aws_dynamodb_table.test.arn
+  consistency_mode = "STRONG"
+}
+`)
 }
